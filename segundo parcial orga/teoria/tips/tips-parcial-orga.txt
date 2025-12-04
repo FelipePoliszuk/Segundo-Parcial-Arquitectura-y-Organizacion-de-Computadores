@@ -1,0 +1,76 @@
+Tu TP está diseñado para que construyas un pequeño **kernel de sistema operativo** desde cero, paso a paso. Cada TP agrega una capa fundamental:
+
+1.  **TP1 (Modo Protegido):** Pasa la CPU de "modo bobo" (Real Mode, 16 bits) a "modo Dios" (Protected Mode, 32 bits), donde tenés control total y seguridad.
+2.  **TP2 (Interrupciones):** Hace que tu kernel deje de ser un bucle sordo y pueda **reaccionar a eventos** del mundo exterior (el reloj, el teclado, e incluso errores de la CPU).
+3.  **TP3 (Paginación):** Implementa la **memoria virtual**. Esto te permite aislar programas entre sí y hacer "trucos" como la memoria *on-demand*.
+4.  **TP4 (Tareas):** Introduce el **multitasking** (multitarea). Te permite tener varios programas (tareas) corriendo "a la vez", cambiando rápidamente entre ellos.
+
+Como bien dijiste, los parciales (`parcial_cartucho.md`, `parcial_malloco.md`) son justamente eso: te piden agregar una nueva funcionalidad (manejar un dispositivo o memoria "lazy") que se apoya *en todas las capas que ya construiste*.
+
+Aquí tienes el resumen de los componentes y conceptos clave que has implementado.
+
+---
+
+## La Idea General del TP: Construyendo un Mini-Kernel
+
+Tu kernel sigue este flujo lógico:
+
+1.  **Arranque (`kernel.asm`):** El código empieza en ensamblador. Lo primero que hacés es deshabilitar interrupciones (`cli`) y configurar la **GDT** (Tabla Global de Descriptores).
+2.  **Modo Protegido (TP1):** Cargás la GDT (`lgdt`) y activás el bit de modo protegido en el registro `CR0`. Hacés un `jmp far` para "aterrizar" ya en código de 32 bits.
+3.  **Interrupciones (TP2):** Configurás el hardware (el PIC, o Controlador de Interrupciones) y cargás tu **IDT** (Tabla de Descriptores de Interrupción) con `lidt`. A partir de acá, si alguien toca una tecla, la CPU automáticamente parará lo que está haciendo y saltará a tu código (`_isr33`).
+4.  **Paginación (TP3):** Creás las primeras tablas de paginación (un **Page Directory** y **Page Tables**) para el kernel, haciendo un *identity mapping* (virtual = física). Cargás la dirección del Page Directory en el registro `CR3` y activás la paginación en `CR0`. ¡Ahora toda dirección de memoria es virtual!
+5.  **Tareas (TP4):** Inicializás el **Scheduler** (`sched_init`) y las **TSS** (Segmentos de Estado de Tarea). Cargás la `tss_idle` con `ltr`.
+6.  **Multitarea:** Habilitás las interrupciones (`sti`). La **interrupción de reloj (`_isr32`)** ahora no solo "hace girar el relojito", sino que llama a `sched_next_task`. Esta función decide qué tarea ejecutar. Si es una tarea distinta a la actual, se produce un **cambio de contexto** (`jmp far [sched_task_offset]`) y el procesador salta a la nueva tarea.
+
+---
+
+## Componentes Clave y Definiciones
+
+Aquí están los "ladrillos" de tu sistema.
+
+### Segmentación (TP1)
+
+* **GDT (Global Descriptor Table):** Es una tabla que usaba la CPU para definir "segmentos" de memoria (ej. "este bloque es código", "este es datos"). En tu TP, usás un *modelo flat*, donde definís segmentos de código y datos que ocupan toda la memoria. Hoy en día es un requisito de hardware "heredado" para entrar a modo protegido.
+
+### Interrupciones (TP2)
+
+* **IDT (Interrupt Descriptor Table):** Es la tabla más importante para la reacción a eventos. Es un "índice" con 256 entradas. Cuando ocurre el evento Nro 33 (teclado), la CPU mira la entrada 33 de la IDT y salta a la dirección de código que vos pusiste ahí.
+* **ISR (Interrupt Service Routine):** Es la *función* a la que salta la CPU (ej. `_isr32`, `_isr33`, `_isr14` en `isr.asm`). Es el código que *atiende* la interrupción.
+* **PIC (Programmable Interrupt Controller):** Es un chip (o parte de uno) que "junta" las interrupciones de hardware (teclado, reloj, etc.) y se las pasa a la CPU de forma ordenada.
+
+### Paginación (TP3)
+
+* **Page Directory (PD):** Es el primer nivel de traducción de memoria virtual. Es una "tabla de tablas" de 1024 entradas. Cada entrada en el PD apunta a una Page Table.
+* **Page Table (PT):** Es el segundo nivel. Es una tabla de 1024 entradas. Cada entrada en la PT finalmente apunta a una **página física** de 4KB de RAM.
+* **Traducción de Direcciones:** `Virtual (32 bits) -> PD index (10 bits) + PT index (10 bits) + Offset (12 bits) -> Física`
+    * **CR3 (Control Register 3):** Es un registro de la CPU que contiene la **dirección física** de tu Page Directory. Cambiar el valor de `CR3` es cambiar *todo el mapa de memoria virtual*. Por eso, cada Tarea tiene su propio `CR3`.
+* **Page Fault (`_isr14`):** Es una excepción que dispara la CPU cuando un programa intenta acceder a una dirección virtual que *no está mapeada* (o no tiene permisos). Tu TP la usa en `page_fault_handler` para implementar memoria "on-demand": el error no es un error, es una *señal* para que el kernel mapee la página en ese momento ("lazy allocation", justo lo del `parcial_malloco.md`).
+
+### Tareas (TP4)
+
+* **TSS (Task State Segment):** Es una estructura de hardware donde la CPU guarda *automáticamente* el estado completo de una tarea (todos sus registros: EAX, EIP, ESP, CR3, etc.) cuando se produce un cambio de contexto.
+* **Scheduler (`sched.c`):** Es tu "policía de tránsito". Es un componente de *software* (no hardware) que decide a quién le toca usar la CPU. El tuyo (`sched_next_task`) es un *Round-Robin* simple: va buscando en un array la próxima tarea en estado `TASK_RUNNABLE`.
+* **Cambio de Contexto (Context Switch):** Es el acto de guardar el estado de la Tarea A, cargar el estado de la Tarea B y empezar a ejecutarla. En tu TP, esto lo dispara la `_isr32` (reloj) que, al llamar a `jmp far` a un selector de TSS, le ordena a la CPU que haga este cambio.
+
+---
+
+## Funciones Importantes (Tu 'Caja de Herramientas')
+
+Estas son las funciones de `mmu.c` y `sched.c` que usás (y usarás en los parciales) constantemente.
+
+* **`mmu_map_page(uint32_t cr3, vaddr_t virt, paddr_t phy, uint32_t attrs)`**
+    * **Qué hace:** Es la función central de la paginación. Le decís "para el mapa de memoria de `cr3`, quiero que la dirección virtual `virt` apunte a la dirección física `phy` con estos permisos `attrs`".
+    * **Cómo:** Busca la entrada de Page Directory. Si no existe la Page Table, la crea (pidiendo una página con `mmu_next_free_kernel_page`). Luego escribe la dirección física `phy` en la Page Table.
+
+* **`copy_page(paddr_t dst_addr, paddr_t src_addr)`**
+    * **Qué hace:** Copia 4KB de contenido de una dirección *física* a otra.
+    * **Cómo:** No puede hacerlo directamente, porque la CPU solo ve direcciones virtuales. El truco es que *mapea temporalmente* `src_addr` a una virtual (ej. `SRC_VIRT_PAGE`) y `dst_addr` a otra (ej. `DST_VIRT_PAGE`), hace la copia en C (un `for` simple), y luego desmapea esas virtuales. Esto es *exactamente* lo que te pide el `parcial_cartucho.md`.
+
+* **`mmu_init_task_dir(paddr_t phy_start)`**
+    * **Qué hace:** Crea un *nuevo mapa de memoria* (un nuevo Page Directory) para una tarea.
+    * **Cómo:** Pide una página para el PD, copia las entradas del kernel (para que la tarea pueda ver el kernel), y luego usa `mmu_map_page` para mapear el código de la tarea (`TASK_CODE_VIRTUAL`) y su pila (`TASK_STACK_BASE`).
+
+* **`sched_next_task(void)`**
+    * **Qué hace:** Decide qué tarea corre después.
+    * **Cómo:** Tiene un array de tareas (`sched_tasks`). Busca a partir de la tarea actual (`current_task`) la siguiente que tenga estado `TASK_RUNNABLE`. Si no encuentra ninguna, devuelve la `TASK_IDLE`.
+

@@ -1,0 +1,80 @@
+ diferencias entre lazy y bajo demanda? que deberia tocar en cada uno?
+
+¡Excelente pregunta! Entender la diferencia entre estos dos conceptos es la clave para no confundirse en el diseño de los parciales, porque aunque el mecanismo mecánico es el mismo (usar Page Faults), el objetivo y la gestión de memoria física son distintos.
+
+Aquí te explico la diferencia exacta en el contexto de tu materia y qué código tocar para cada uno.
+1. Conceptos: ¿Cuál es la diferencia?
+
+Aunque ambos usan la "Interrupción 14" (Page Fault), responden a preguntas distintas:
+A. "Bajo Demanda" (Modelo TP3 / Shared Memory)
+
+    El Concepto: "Ya existe un recurso (físico) compartido, pero no te lo voy a mapear en tu mapa de memoria hasta que realmente intentes usarlo".
+
+    El Objetivo: Ahorrar espacio en las Tablas de Páginas y facilitar la memoria compartida.
+
+    La Diferencia Clave: Cuando ocurre el fallo, mapeas a una dirección física FIJA o PRE-EXISTENTE. Todos los que accedan ahí verán la misma página física.
+
+        Ejemplo TP3: La dirección virtual 0x07000000 se mapea siempre a la física 0x03000000.
+
+B. "Lazy Allocation" (Modelo Malloco / Heap)
+
+    El Concepto: "Te prometo que tienes memoria disponible (como un malloc), pero no voy a gastar RAM real hasta que escribas en ella".
+
+    El Objetivo: Ahorrar memoria RAM física. Si pides 1GB pero usas 1KB, el sistema solo gasta 1KB de RAM real.
+
+    La Diferencia Clave: Cuando ocurre el fallo, pides una NUEVA página física (mmu_next_free_user_page), la limpias (ceros) y se la das exclusivamente a esa tarea.
+
+        Ejemplo Malloco: La virtual 0xA1000000 se mapea a una física nueva que nadie más tiene.
+
+2. ¿Qué tenés que tocar en cada caso?
+
+En ambos casos, el flujo de control empieza igual (_isr14 -> page_fault_handler), pero la lógica dentro de C cambia.
+Archivos Comunes (Para ambos)
+
+    isr.asm: Debes modificar _isr14 para que llame a page_fault_handler y, si devuelve error, desaloje la tarea (como hicimos en tu solución anterior).
+
+    idt.c: Registrar la interrupción 14 (si no estaba).
+
+Diferencias en mmu.c (page_fault_handler)
+
+Aquí es donde el código se bifurca. Tu handler debe decidir qué estrategia aplicar según la dirección virtual (virt).
+C
+
+bool page_fault_handler(vaddr_t virt) {
+
+    // --- CASO A: BAJO DEMANDA (TP3 / Shared) ---
+    // "¿Es la dirección de memoria compartida?"
+    if (virt >= ON_DEMAND_MEM_START_VIRTUAL && 
+        virt <= ON_DEMAND_MEM_END_VIRTUAL) {
+        
+        // ESTRATEGIA: Mapear a una FÍSICA FIJA/CONOCIDA
+        // Todos los procesos ven la misma física (0x03000000)
+        mmu_map_page(rcr3(), virt, ON_DEMAND_MEM_START_PHYSICAL, MMU_P | MMU_U | MMU_W);
+        return true;
+    }
+
+    // --- CASO B: LAZY ALLOCATION (Malloco) ---
+    // "¿Es una dirección que la tarea reservó con malloc?"
+    if (esMemoriaReservada(virt)) { // (Tu función auxiliar)
+        
+        // ESTRATEGIA: Mapear a una FÍSICA NUEVA
+        // Cada página es única para esta tarea.
+        paddr_t nueva_fisica = mmu_next_free_user_page();
+        zero_page(nueva_fisica); // ¡Importante limpiar en Lazy!
+        
+        mmu_map_page(rcr3(), virt, nueva_fisica, MMU_P | MMU_U | MMU_W);
+        return true;
+    }
+
+    return false; // Segfault real
+}
+
+Resumen para el Parcial
+Característica	Bajo Demanda (Shared)	Lazy Allocation (Malloc)
+Dirección Virtual	Fija/Conocida (ej. 0x0700...)	Dinámica (rango de heap)
+Dirección Física	Fija / Compartida	Nueva / Privada
+Acción al fallar	mmu_map_page(..., FISICA_FIJA)	mmu_next_free_user_page() + zero
+Permisos	Usualmente RW para todos	RW (privado)
+Ejemplo TP	TP3 (Memoria Compartida)	Parcial Malloco / Parejas
+
+Tip: En el parcial de Parejas, usas una mezcla: es Lazy (porque se asigna al acceder) pero es Compartida (porque si la pareja ya la pidió, usas esa física existente y no una nueva).

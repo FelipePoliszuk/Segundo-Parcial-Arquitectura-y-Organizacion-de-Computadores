@@ -1,0 +1,108 @@
+
+### Registros de Propósito General (GPRs) en x86-32
+
+Son 8 "cajones" de alta velocidad en la CPU para manipulación de datos.
+
+#### 1\. Registros Principales (Datos y Cálculos)
+
+  * **EAX (Accumulator):** Para cálculos aritméticos. Por convención, guarda el **valor de retorno** de una función.
+  * **EBX (Base):** Para guardar punteros a datos.
+  * **ECX (Counter):** Usado como contador en bucles.
+  * **EDX (Data):** Extensión de EAX para operaciones grandes (multiplicación/división).
+
+#### 2\. Registros Índice (Punteros a Arrays/Strings)
+
+  * **ESI (Source Index):** Puntero "fuente" (desde dónde leer).
+  * **EDI (Destination Index):** Puntero "destino" (hacia dónde escribir).
+
+*(Contexto Parcial Swap: Te pide intercambiar estos 6 registros: EAX, EBX, ECX, EDX, ESI, EDI).*
+
+#### 3\. Registros Puntero (Manejo de la Pila)
+
+  * **ESP (Stack Pointer):** El más crítico. Apunta al "tope" actual de la pila.
+  * **EBP (Base Pointer):** Marca la "base" del *stack frame* de una función (para acceder a parámetros y variables locales).
+
+*(Nota: EIP (Instruction Pointer) NO es un GPR. Solo indica la próxima instrucción a ejecutar).*
+
+-----
+
+### Convención de Pasaje de Parámetros (`cdecl` en tu TP)
+
+Es la "regla de etiqueta" para que C y ASM se comuniquen.
+
+#### 1\. Convención `cdecl` (C estándar)
+
+  * **Parámetros:** Se pasan a través de la **Pila (Stack)**.
+  * **Orden:** Al revés (de derecha a izquierda).
+      * `mi_funcion(a, b, c);` se convierte en:
+        ```asm
+        push c     ; 3er parámetro
+        push b     ; 2do parámetro
+        push a     ; 1er parámetro
+        call mi_funcion
+        ```
+  * **Valor de Retorno:** Siempre se devuelve en el registro `EAX`.
+  * **Limpieza de Pila:** El **llamador** (el código que hizo `call`) limpia la pila después.
+    ```asm
+    add esp, 12  ; Limpia 3 parámetros (3 * 4 bytes)
+    ```
+
+#### 2\. Convención de Syscall (Tu Híbrido Kernel)
+
+Este es el flujo de un parámetro (ej. `id_tarea` en `EBX`) y un valor de retorno:
+
+1.  **Tarea (Nivel 3) -\> Kernel:**
+
+      * La Tarea pone `id_tarea` en `EBX`.
+      * Ejecuta `int 91`.
+
+2.  **Kernel (ASM) -\> Kernel (C):**
+
+      * El handler `_isr91` se activa. Sigue `cdecl` para llamar a C.
+
+    <!-- end list -->
+
+    ```asm
+    _isr91:
+        pushad          ; Guarda el estado de la Tarea
+        push ebx        ; 1. Pone el parámetro (id_tarea) en la PILA
+        call swap_handler ; 2. Llama a la función C
+        add esp, 4      ; 4. El ASM (llamador) limpia la pila
+    ```
+
+3.  **Kernel (C) -\> Kernel (ASM):**
+
+      * La función C (`swap_handler`) usa `return true;` o `return false;`.
+      * Esto pone `1` o `0` en el registro `EAX`.
+
+4.  **Kernel (ASM) -\> Tarea (Nivel 3):**
+
+      * El handler `_isr91` recupera el control. El `0` o `1` está en `EAX`.
+      * El ASM modifica el `EAX` de la Tarea (que está "congelada" en la pila gracias a `pushad`):
+
+    <!-- end list -->
+
+    ```asm
+    mov [esp + offset_EAX], eax  ; Pone el 0 o 1 en el EAX guardado de la Tarea
+    popad                        ; Restaura la Tarea (ahora con el EAX modificado)
+    iret                         ; Regresa a la Tarea
+    ```
+
+      * **Excepción (Bloqueo):** Si la syscall es bloqueante (`swap_handler` devuelve `false`), el ASM tira todo esto y en su lugar hace:
+
+    <!-- end list -->
+
+    ```asm
+    ; (viene del 'cmp al, 0')
+    call sched_next_task         ; Llama al scheduler
+    mov word [sched_task_selector], ax
+    jmp far [sched_task_offset]  ; Salta a la siguiente tarea
+    ```
+    
+   
+CR3 lo configuras tú para decirle a la CPU cuál mapa de memoria usar.
+
+CR2 lo configura la CPU para decirte a ti qué dirección virtual rompió el mapa.
+    
+    
+    

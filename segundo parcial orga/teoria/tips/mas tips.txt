@@ -1,0 +1,111 @@
+Machete Mental para el Parcial
+
+1. 🧠 La Pregunta Cero: ¿Qué me están pidiendo conectar?
+
+Todo parcial es un problema de conectar Paginación, Tareas, Interrupciones y Syscalls. Apenas leas el enunciado, pregúntate:
+
+    ¿Es "Lazy" o "Bajo Demanda"? → La clave es el Page Fault (_isr14).
+
+    ¿La tarea se "duerme" o "espera"? → La clave es una Syscall Bloqueante (ASM jmp far).
+
+    ¿Dos tareas colaboran? → La clave es Memoria Compartida (mapear la misma página física a dos virtuales).
+
+    ¿El kernel "despierta" tareas? → La clave es una IRQ de hardware (como _isr40 o _isr32).
+
+2. ⚠️ El Error Más Común: ¡La Trampa del Nivel 0!
+
+El kernel (Nivel 0) no siempre puede leer la memoria de una tarea (Nivel 3). Depende de cómo llegaste al Nivel 0.
+
+    Caso 1: Syscall (Ej. swap, chau)
+
+        Contexto: Sigues en el CR3 de la Tarea.
+
+        Regla: ¡SÍ PUEDES! Puedes hacer *(uint8_t*)0xC001C0DE = 1; porque estás en el mapa de memoria de la tarea, pero con permisos de Nivel 0.
+
+        OJO: Solo puedes acceder a la memoria de la tarea actual (current_task).
+
+    Caso 2: IRQ de Hardware (Ej. deviceready) o Tarea de Kernel (Ej. garbage_collector)
+
+        Contexto: Estás en el CR3 de la tarea interrumpida (que puede ser CUALQUIERA) o en el CR3 del Kernel.
+
+        Regla: ¡NO PUEDES! No puedes leer 0xACCE5000 de una tarea "dormida".
+
+        Solución: Debes usar tu "caja de herramientas":
+
+            cr3_tarea = get_cr3_from_task_id(id_tarea_dormida);
+
+            puntero_fisico = traducir_puntero_tarea(0xACCE5000, id_tarea_dormida);
+
+            uint8_t mode = *puntero_fisico;
+
+3. ⚙️ La Mecánica de Bloqueo: ASM jmp far vs. iret
+
+¿Cómo "bloqueas" una tarea en una syscall (como swap u opendevice)?
+
+    Paso 1 (En C): Pones el estado en "dormido".
+    C
+
+void mi_syscall_bloqueante() {
+  sched_tasks[current_task].state = TASK_PAUSED;
+  // (Opcional: guardar la intención, ej. tarea->id_swapeo = id_destino)
+}
+
+Paso 2 (En ASM): El handler NO debe regresar. Debe ceder la CPU.
+Fragmento de código
+
+    _mi_isr_bloqueante:
+        pushad
+        push ebx                     ; Pasar parámetros (si hay)
+        call mi_syscall_bloqueante   ; Llamar al C
+        add esp, 4                   ; Limpiar parámetros
+
+        ; --- AQUÍ ESTÁ LA CLAVE ---
+        call sched_next_task         ;
+        mov word [sched_task_selector], ax
+        jmp far [sched_task_offset]  ; ¡Saltar! No hay popad/iret
+
+    (Si la syscall NO bloquea, como chau o closedevice, entonces SÍ usas popad / iret).
+
+4. 📝 La "Pizarra" de Estado: sched_entry_t
+
+Casi todos los parciales te piden guardar información nueva. ¿Dónde? Tu primer instinto siempre debe ser: modificar sched_entry_t en sched.c.
+
+    parcial_cartucho necesita: uint8_t mode; vaddr_t copyDir; paddr_t copyPhys;
+
+    parcial_swap necesita: task_id id_swapeo;
+
+    parcial_parejas necesita: pareja_state_t pareja_estado; int8_t id_pareja_struct;
+
+5. 💡 La Lógica de "Lazy Allocation": _isr14 (Page Fault)
+
+Si el enunciado dice "lazy", "bajo demanda", o "gradual", la respuesta es modificar el page_fault_handler (en mmu.c) y _isr14 (en isr.asm).
+
+    Tu page_fault_handler (C) debe:
+
+        Recibir vaddr_t virt (que viene de CR2).
+
+        Chequear si virt está en tu nuevo rango (ej. esMemoriaReservada(virt)).
+
+        Si está:
+
+            Pedir una página física: paddr_t pag = mmu_next_free_user_page();
+
+            Limpiarla: zero_page(pag);
+
+            Mapearla: mmu_map_page(rcr3(), virt_alineada, pag, MMU_P | MMU_U | MMU_W);
+
+            return true;
+
+        Si no está:
+
+            return false;
+
+    Tu _isr14 (ASM) debe:
+
+        Llamar al page_fault_handler.
+
+        Si false (cmp al, 0), desalojar la tarea (llamar a kernel_exception_handler... + sched_next_task + jmp far).
+
+        Si true (cmp al, 1), popad + iret.
+
+Tip Final: ¡Confía en tu diseño! Los enunciados lo dicen: "No es necesario que el código compile". Se están fijando en que sepas qué piezas tocar y cómo conectarlas. Tu "caja de herramientas" de funciones auxiliares es la clave.
